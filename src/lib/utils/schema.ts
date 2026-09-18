@@ -4,8 +4,8 @@
  */
 
 // Site URL - can be overridden via environment variable
-import { PUBLIC_SITE_URL } from 'astro/env/server';
-const SITE_URL = PUBLIC_SITE_URL ?? 'https://nearme.directory';
+import { getEnv } from 'astro/env/runtime';
+const SITE_URL = getEnv('PUBLIC_SITE_URL') ?? 'https://nearme.directory';
 
 import { getFeatureLabel } from '../feature-icons';
 

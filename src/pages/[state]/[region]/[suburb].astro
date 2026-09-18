@@ -6,7 +6,7 @@ import SuburbHeader from '../../../components/listing/SuburbHeader.astro';
 import SuburbMap from '../../../components/listing/SuburbMap.astro';
 import SuburbListingList from '../../../components/listing/SuburbListingList.astro';
 import SuburbMoreSection from '../../../components/listing/SuburbMoreSection.astro';
-import SuburbEeatContent from '../../../components/listing/SuburbEeatContent.astro';
+import LocationEeatContent from '../../../components/listing/LocationEeatContent.astro';
 import FeaturePills from '../../../components/directory/FeaturePills.astro';
 import { fetchSuburbData } from '../../../lib/db';
 import { getSuburbMetadata } from '../../../lib/utils/seo';
@@ -130,7 +130,7 @@ const facilitiesWithPaths = listings?.map(t => ({
     </div>
 
     <div class="w-full">
-      <SuburbEeatContent
+      <LocationEeatContent
         content={{}}
         locationName={suburbData.name}
       />

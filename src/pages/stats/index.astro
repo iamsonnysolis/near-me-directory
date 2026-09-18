@@ -67,7 +67,7 @@ const stateCount = accessibleTab.bars.length;
 const sourceVersion = nation?.listing_count?.source_version;
 const year = (sourceVersion || '').split('-')[0] || ('' + new Date().getFullYear());
 
-// Built here (frontmatter), not inline in the <script> tag below — Astro
+// Built here (frontmatter), not inline in the script tag below -- Astro
 // never evaluates {} expressions inside <script> content, even with
 // is:inline, so JSON.stringify(...) has to run here and get injected via
 // set:html instead.

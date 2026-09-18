@@ -19,6 +19,8 @@ export default defineConfig({
       PUBLIC_SITE_URL: {
         type: 'string',
         default: 'https://nearme.directory',
+        access: 'public',
+        context: 'client',
       },
     },
   },
