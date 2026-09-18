@@ -35,7 +35,7 @@ interface MapFacility {
  * Returns listings within the specified bounding box
  */
 export const GET: APIRoute = async ({ url, locals }) => {
-  const db = getD1Client({ DB: (locals as any)?.DB });
+  const db = await getD1Client({ DB: (locals as any)?.DB });
 
   // Extract and parse bounding box parameters
   const minLatParam = url.searchParams.get('minLat');
@@ -67,11 +67,13 @@ export const GET: APIRoute = async ({ url, locals }) => {
   try {
     // Build SQL query with required columns for popup routing
     let sql = `
-      SELECT listing_id, name, latitude, longitude, slug, state_code,
-             region_slug, suburb_slug, address, is_open_24h
-      FROM listings
-      WHERE latitude >= ? AND latitude <= ?
-        AND longitude >= ? AND longitude <= ?
+      SELECT b.id AS listing_id, b.name, b.latitude, b.longitude, b.slug, b.state_code,
+             r.slug AS region_slug, sub.slug AS suburb_slug, b.address, b.is_24_hours AS is_open_24h
+      FROM businesses b
+      LEFT JOIN suburbs sub ON b.suburb_id = sub.id
+      LEFT JOIN regions r ON b.region_id = r.id
+      WHERE b.latitude >= ? AND b.latitude <= ?
+        AND b.longitude >= ? AND b.longitude <= ?
     `;
     const params: any[] = [minLat, maxLat, minLng, maxLng];
 
@@ -90,8 +92,8 @@ export const GET: APIRoute = async ({ url, locals }) => {
       if (ids.length > 0) {
         const placeholders = ids.map(() => '?').join(',');
         const featRows = await runQuery(db,
-          `SELECT listing_id, feature_key FROM features
-           WHERE listing_id IN (${placeholders})
+          `SELECT business_id AS listing_id, feature_key FROM business_features
+           WHERE business_id IN (${placeholders})
            AND feature_key IN (${features.map(() => '?').join(',')})`,
           [...ids, ...features]
         );

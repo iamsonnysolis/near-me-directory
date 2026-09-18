@@ -37,7 +37,7 @@ function monthInSeason(month: number, monthStart: number | null, monthEnd: numbe
  * Returns open status for each listing based on user's local time
  */
 export const GET: APIRoute = async ({ url, locals }) => {
-  const db = getD1Client({ DB: (locals as any)?.DB });
+  const db = await getD1Client({ DB: (locals as any)?.DB });
   const p = url.searchParams;
   const raw = p.get('ids');
   const dow = parseInt(p.get('dow') ?? '0', 10);
@@ -62,9 +62,11 @@ export const GET: APIRoute = async ({ url, locals }) => {
   try {
     const placeholders = ids.map(() => '?').join(',');
     const rows = await runQuery(db,
-      `SELECT listing_id, day_of_week, month_start, month_end, open_mins, close_mins,
-              is_open_24h, is_daylight, is_unknown
-       FROM hours WHERE listing_id IN (${placeholders})`,
+      `SELECT bh.business_id AS listing_id, bh.day_of_week, NULL AS month_start, NULL AS month_end,
+              bh.open_mins, bh.close_mins, b.is_24_hours AS is_open_24h, 0 AS is_daylight, 0 AS is_unknown
+       FROM business_hours bh
+       JOIN businesses b ON bh.business_id = b.id
+       WHERE bh.business_id IN (${placeholders})`,
       ids
     );
 

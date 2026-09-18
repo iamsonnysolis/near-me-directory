@@ -45,7 +45,7 @@ if (!stateRecord) {
 
 // Fetch content, feature counts, and state listings in parallel
 const [contentRows, featureCounts, stateFacilities] = await Promise.all([
-  fetchContent('state', stateSlug),
+  fetchContent('state', stateRecord.code),
   fetchStateFeatureCounts(stateRecord.code),
   fetchStateListings(stateRecord.code),
 ]);

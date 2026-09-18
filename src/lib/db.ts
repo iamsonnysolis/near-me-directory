@@ -2,6 +2,15 @@
  * Database utilities for near-me-directory
  * D1-based data fetching with graceful error handling
  * All queries use parameterized SQL on Cloudflare D1
+ *
+ * NOTE: Table/column names mapped to directory-factory D1 schema:
+ *   listings  -> businesses (joined with suburbs/regions/states for town/slugs)
+ *   features  -> business_features (joined with businesses for state_code/region/suburb)
+ *   hours     -> business_hours (joined with businesses for listing_id)
+ *   notes     -> content (filtered by entity_type='business')
+ *   listing_count -> business_count (in states/regions/suburbs)
+ *   is_open_24h  -> is_24_hours (in businesses)
+ *   listing_id    -> id (in businesses)
  */
 
 import { getD1Client, runQuery, runQuerySingle, runCount } from './d1';
@@ -47,6 +56,7 @@ export interface SuburbRecord {
   listing_count: number;
   latitude?: number;
   longitude?: number;
+  region_slug?: string;
 }
 
 export interface FeatureRecord {
@@ -100,6 +110,28 @@ export interface FeatureCounts {
 }
 
 /**
+ * Common join for listings (= businesses with suburb/region/state aliases).
+ * Used by fetchListingDetailData and nearby-listings query.
+ */
+const LISTINGS_JOIN = `
+  FROM businesses b
+  LEFT JOIN suburbs sub ON b.suburb_id = sub.id
+  LEFT JOIN regions r ON b.region_id = r.id
+  LEFT JOIN states s ON b.state_code = s.code
+`;
+
+const LISTINGS_COLS = `
+  b.id AS listing_id, b.slug, b.name, b.address,
+  sub.name AS town, sub.name AS suburb,
+  b.latitude, b.longitude, b.is_24_hours AS is_open_24h,
+  sub.slug AS suburb_slug, r.slug AS region_slug,
+  b.state_code, s.name AS state,
+  b.google_place_id, b.category, b.is_mobile_service,
+  b.is_emergency_service, b.phone, b.website,
+  b.opening_hours_raw
+`;
+
+/**
  * Fetches all data required for a listing detail page
  * All secondary queries are wrapped in try/catch to prevent build failures
  */
@@ -112,11 +144,11 @@ export async function fetchListingDetailData(params: {
   const { state, region, suburb, listing } = params;
   const stateCode = state.toUpperCase();
 
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
 
   // Primary fetch - the listing itself
   const listingData = await runQuerySingle(db,
-    `SELECT * FROM listings WHERE slug = ? AND suburb_slug = ? AND region_slug = ? LIMIT 1`,
+    `SELECT ${LISTINGS_COLS} ${LISTINGS_JOIN} WHERE b.slug = ? AND sub.slug = ? AND r.slug = ? LIMIT 1`,
     [listing, suburb, region]
   );
 
@@ -127,8 +159,8 @@ export async function fetchListingDetailData(params: {
   // Parallel secondary fetches with error handling
   const [stateResult, regionResult, suburbResult] = await Promise.all([
     runQuerySingle(db, 'SELECT code, name, slug FROM states WHERE code = ? LIMIT 1', [stateCode]),
-    runQuerySingle(db, 'SELECT id, name, slug, state_code, listing_count, name_clean FROM regions WHERE slug = ? AND state_code = ? LIMIT 1', [region, stateCode]),
-    runQuerySingle(db, 'SELECT id, name, slug, state_code, listing_count FROM suburbs WHERE slug = ? AND state_code = ? LIMIT 1', [suburb, stateCode]),
+    runQuerySingle(db, 'SELECT id, name, slug, state_code, business_count AS listing_count, name AS name_clean FROM regions WHERE slug = ? AND state_code = ? LIMIT 1', [region, stateCode]),
+    runQuerySingle(db, 'SELECT id, name, slug, state_code, business_count AS listing_count FROM suburbs WHERE slug = ? AND state_code = ? LIMIT 1', [suburb, stateCode]),
   ]);
 
   // Feature, hours, and notes fetch with error handling
@@ -137,9 +169,9 @@ export async function fetchListingDetailData(params: {
   let notes: NoteRecord[] | null = null;
   try {
     [features, hours, notes] = await Promise.all([
-      runQuery(db, 'SELECT listing_id, feature_key FROM features WHERE listing_id = ?', [listingData.listing_id]),
-      runQuery(db, 'SELECT day_of_week, month_start, month_end, open_mins, close_mins, is_open_24h, is_daylight, is_unknown FROM hours WHERE listing_id = ? ORDER BY day_of_week', [listingData.listing_id]),
-      runQuery(db, 'SELECT note_type, note FROM notes WHERE listing_id = ?', [listingData.listing_id]),
+      runQuery(db, 'SELECT business_id AS listing_id, feature_key FROM business_features WHERE business_id = ?', [listingData.listing_id]),
+      runQuery(db, 'SELECT bh.day_of_week, NULL AS month_start, NULL AS month_end, bh.open_mins, bh.close_mins, b.is_24_hours AS is_open_24h, 0 AS is_daylight, 0 AS is_unknown FROM business_hours bh JOIN businesses b ON bh.business_id = b.id WHERE bh.business_id = ? ORDER BY bh.day_of_week', [listingData.listing_id]),
+      runQuery(db, 'SELECT content_type AS note_type, body AS note FROM content WHERE entity_type = ' + "'business' AND entity_id = CAST(? AS TEXT)", [listingData.listing_id]),
     ]);
   } catch (err) {
     console.warn('Feature/hours/notes fetch failed:', err);
@@ -151,17 +183,18 @@ export async function fetchListingDetailData(params: {
     try {
       // Haversine formula for distance calculation in D1
       const nearby = await runQuery(db, `
-        SELECT listing_id, slug, name, suburb, suburb_slug, region_slug, state_code, state,
+        SELECT b.id AS listing_id, b.slug, b.name, sub.name AS suburb,
+          sub.slug AS suburb_slug, r.slug AS region_slug, b.state_code, s.name AS state,
           CAST(
             6371000 * acos(
-              cos(radians(?)) * cos(radians(latitude)) * cos(radians(longitude) - radians(?)) +
-              sin(radians(?)) * sin(radians(latitude))
+              cos(radians(?)) * cos(radians(b.latitude)) * cos(radians(b.longitude) - radians(?)) +
+              sin(radians(?)) * sin(radians(b.latitude))
             ) AS INTEGER
           ) AS distance_m
-        FROM listings
-        WHERE listing_id != ?
-          AND latitude IS NOT NULL
-          AND longitude IS NOT NULL
+        ${LISTINGS_JOIN}
+        WHERE b.id != ?
+          AND b.latitude IS NOT NULL
+          AND b.longitude IS NOT NULL
         ORDER BY distance_m ASC
         LIMIT 5
       `, [listingData.latitude, listingData.longitude, listingData.latitude, listingData.listing_id]);
@@ -191,15 +224,15 @@ export async function fetchListingDetailData(params: {
  */
 export async function fetchStateData(state: string, env?: { DB?: D1Database }) {
   const stateCode = state.toUpperCase();
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
 
   const stateData = await runQuerySingle(db,
-    'SELECT code, name, slug, listing_count FROM states WHERE code = ? LIMIT 1',
+    'SELECT code, name, slug, business_count AS listing_count FROM states WHERE code = ? LIMIT 1',
     [stateCode]
   );
 
   const regions = await runQuery(db,
-    'SELECT id, name, slug, state_code, listing_count, name_clean FROM regions WHERE state_code = ? ORDER BY name_clean',
+    'SELECT id, name, slug, state_code, business_count AS listing_count, name AS name_clean FROM regions WHERE state_code = ? ORDER BY name',
     [stateCode]
   );
 
@@ -215,15 +248,16 @@ export async function fetchStateData(state: string, env?: { DB?: D1Database }) {
  */
 export async function fetchRegionData(state: string, region: string, env?: { DB?: D1Database }) {
   const stateCode = state.toUpperCase();
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
 
   const [stateResult, regionResult] = await Promise.all([
-    runQuerySingle(db, 'SELECT code, name, slug, listing_count FROM states WHERE code = ? LIMIT 1', [stateCode]),
-    runQuerySingle(db, 'SELECT id, name, slug, state_code, listing_count, name_clean FROM regions WHERE slug = ? AND state_code = ? LIMIT 1', [region, stateCode]),
+    runQuerySingle(db, 'SELECT code, name, slug, business_count AS listing_count FROM states WHERE code = ? LIMIT 1', [stateCode]),
+    runQuerySingle(db, 'SELECT id, name, slug, state_code, business_count AS listing_count, name AS name_clean FROM regions WHERE slug = ? AND state_code = ? LIMIT 1', [region, stateCode]),
   ]);
 
+  // suburbs join through regions to filter by region_slug
   const suburbs = await runQuery(db,
-    'SELECT id, name, slug, state_code, listing_count, latitude, longitude FROM suburbs WHERE state_code = ? AND region_slug = ? ORDER BY name',
+    'SELECT s.id, s.name, s.slug, s.state_code, s.business_count AS listing_count, NULL AS latitude, NULL AS longitude, r.slug AS region_slug FROM suburbs s JOIN regions r ON s.region_id = r.id WHERE s.state_code = ? AND r.slug = ? ORDER BY s.name',
     [stateCode, region]
   );
 
@@ -240,16 +274,17 @@ export async function fetchRegionData(state: string, region: string, env?: { DB?
  */
 export async function fetchSuburbData(state: string, region: string, suburb: string, env?: { DB?: D1Database }) {
   const stateCode = state.toUpperCase();
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
 
   const [stateResult, regionResult, suburbResult] = await Promise.all([
-    runQuerySingle(db, 'SELECT code, name, slug, listing_count FROM states WHERE code = ? LIMIT 1', [stateCode]),
-    runQuerySingle(db, 'SELECT id, name, slug, state_code, listing_count, name_clean FROM regions WHERE slug = ? AND state_code = ? LIMIT 1', [region, stateCode]),
-    runQuerySingle(db, 'SELECT id, name, slug, state_code, listing_count FROM suburbs WHERE slug = ? AND state_code = ? LIMIT 1', [suburb, stateCode]),
+    runQuerySingle(db, 'SELECT code, name, slug, business_count AS listing_count FROM states WHERE code = ? LIMIT 1', [stateCode]),
+    runQuerySingle(db, 'SELECT id, name, slug, state_code, business_count AS listing_count, name AS name_clean FROM regions WHERE slug = ? AND state_code = ? LIMIT 1', [region, stateCode]),
+    runQuerySingle(db, 'SELECT s.id, s.name, s.slug, s.state_code, s.business_count AS listing_count FROM suburbs s WHERE s.slug = ? AND s.state_code = ? LIMIT 1', [suburb, stateCode]),
   ]);
 
+  // Listings for this suburb (state_code + region_slug + suburb_slug)
   const listings = await runQuery(db,
-    'SELECT listing_id, slug, name, address, town, latitude, longitude, is_open_24h FROM listings WHERE state_code = ? AND region_slug = ? AND suburb_slug = ? ORDER BY name',
+    `SELECT ${LISTINGS_COLS} ${LISTINGS_JOIN} WHERE b.state_code = ? AND r.slug = ? AND sub.slug = ? ORDER BY b.name`,
     [stateCode, region, suburb]
   );
 
@@ -264,9 +299,10 @@ export async function fetchSuburbData(state: string, region: string, suburb: str
 
 /**
  * Fetches EEAT content blocks for a state/region/suburb
+ * entity_id mapping: states → code (e.g. 'QLD'); regions → CAST(id AS TEXT); suburbs → CAST(id AS TEXT)
  */
 export async function fetchContent(entityType: string, entityId: string, env?: { DB?: D1Database }): Promise<ContentRow[]> {
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
   const rows = await runQuery(db,
     'SELECT content_type, body FROM content WHERE entity_type = ? AND entity_id = ? AND approved = 1',
     [entityType, entityId]
@@ -278,15 +314,16 @@ export async function fetchContent(entityType: string, entityId: string, env?: {
  * Fetches feature counts for a state (for EEAT placeholder resolution)
  */
 export async function fetchStateFeatureCounts(stateCode: string, env?: { DB?: D1Database }): Promise<FeatureCounts> {
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
+  const sc = stateCode.toUpperCase();
   const featureKeys = ['accessible', 'baby_change', 'baby_care_room', 'changing_places', 'dump_point', 'shower', 'parking', 'drinking_water'];
 
   const results = await Promise.all([
     ...featureKeys.map((key) =>
-      runCount(db, 'SELECT COUNT(*) as cnt FROM features WHERE state_code = ? AND feature_key = ?', [stateCode.toUpperCase(), key])
+      runCount(db, 'SELECT COUNT(*) as cnt FROM business_features bf JOIN businesses b ON bf.business_id = b.id WHERE b.state_code = ? AND bf.feature_key = ?', [sc, key])
         .then((count) => ({ key, count }))
     ),
-    runCount(db, 'SELECT COUNT(*) as cnt FROM listings WHERE state_code = ? AND is_open_24h = 1', [stateCode.toUpperCase()])
+    runCount(db, 'SELECT COUNT(*) as cnt FROM businesses WHERE state_code = ? AND is_24_hours = 1', [sc])
       .then((count) => ({ key: 'open_24h', count })),
   ]);
 
@@ -310,16 +347,17 @@ export async function fetchStateFeatureCounts(stateCode: string, env?: { DB?: D1
  * Fetches feature counts for a region (for EEAT placeholder resolution)
  */
 export async function fetchRegionFeatureCounts(regionSlug: string, stateCode: string, env?: { DB?: D1Database }): Promise<FeatureCounts> {
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
+  const sc = stateCode.toUpperCase();
   const featureKeys = ['accessible', 'baby_change', 'baby_care_room', 'changing_places', 'dump_point', 'shower', 'parking', 'drinking_water'];
 
   const results = await Promise.all([
     ...featureKeys.map((key) =>
-      runCount(db, 'SELECT COUNT(*) as cnt FROM features WHERE state_code = ? AND region_slug = ? AND feature_key = ?', [stateCode.toUpperCase(), regionSlug, key])
+      runCount(db, 'SELECT COUNT(*) as cnt FROM business_features bf JOIN businesses b ON bf.business_id = b.id LEFT JOIN regions r ON b.region_id = r.id WHERE b.state_code = ? AND r.slug = ? AND bf.feature_key = ?', [sc, regionSlug, key])
         .then((count) => ({ key, count }))
     ),
-    runCount(db, 'SELECT COUNT(*) as cnt FROM listings WHERE state_code = ? AND region_slug = ? AND is_open_24h = 1', [stateCode.toUpperCase(), regionSlug])
-      .then((count) => ({ key: 'open_24h', count })),
+    runCount(db, `SELECT COUNT(*) as cnt FROM businesses b LEFT JOIN regions r ON b.region_id = r.id WHERE b.state_code = ? AND r.slug = ? AND b.is_24_hours = 1`, [sc, regionSlug])
+      .then((count) => ({ key: 'open_24h', count }))
   ]);
 
   const map: Record<string, number> = {};
@@ -342,10 +380,12 @@ export async function fetchRegionFeatureCounts(regionSlug: string, stateCode: st
  * Fetches listings for a region (for map markers on region pages)
  */
 export async function fetchRegionListings(stateCode: string, regionSlug: string, env?: { DB?: D1Database }): Promise<ListingRecord[]> {
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
+  const sc = stateCode.toUpperCase();
+  const cols = 'b.id AS listing_id, b.slug, b.name, b.address, b.latitude, b.longitude, b.is_24_hours AS is_open_24h, r.slug AS region_slug, sub.slug AS suburb_slug, b.state_code';
   const listings = await runQuery(db,
-    'SELECT listing_id, slug, name, address, latitude, longitude, is_open_24h, region_slug, suburb_slug, state_code FROM listings WHERE state_code = ? AND region_slug = ? ORDER BY name',
-    [stateCode.toUpperCase(), regionSlug]
+    `SELECT ${cols} ${LISTINGS_JOIN} WHERE b.state_code = ? AND r.slug = ? ORDER BY b.name`,
+    [sc, regionSlug]
   );
   return (listings || []) as ListingRecord[];
 }
@@ -354,10 +394,12 @@ export async function fetchRegionListings(stateCode: string, regionSlug: string,
  * Fetches listings for a state (for map markers on state pages - limited for performance)
  */
 export async function fetchStateListings(stateCode: string, limit: number = 100, env?: { DB?: D1Database }): Promise<ListingRecord[]> {
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
+  const sc = stateCode.toUpperCase();
+  const cols = 'b.id AS listing_id, b.slug, b.name, b.address, b.latitude, b.longitude, b.is_24_hours AS is_open_24h, r.slug AS region_slug, sub.slug AS suburb_slug, b.state_code';
   const listings = await runQuery(db,
-    'SELECT listing_id, slug, name, address, latitude, longitude, is_open_24h, region_slug, suburb_slug, state_code FROM listings WHERE state_code = ? ORDER BY name LIMIT ?',
-    [stateCode.toUpperCase(), limit]
+    `SELECT ${cols} ${LISTINGS_JOIN} WHERE b.state_code = ? ORDER BY b.name LIMIT ?`,
+    [sc, limit]
   );
   return (listings || []) as ListingRecord[];
 }
@@ -367,16 +409,18 @@ export async function fetchStateListings(stateCode: string, limit: number = 100,
  * Used for state-level feature-filter pages
  */
 export async function fetchStateListingsByFeature(stateCode: string, featureKey: string, env?: { DB?: D1Database }): Promise<ListingRecord[]> {
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
+  const sc = stateCode.toUpperCase();
 
-  // Get listings with this feature using a JOIN
   const listings = await runQuery(db, `
-    SELECT DISTINCT l.listing_id, l.slug, l.name, l.address, l.town, l.latitude, l.longitude, l.is_open_24h, l.region_slug, l.suburb_slug, l.state_code
-    FROM listings l
-    INNER JOIN features f ON f.listing_id = l.listing_id
-    WHERE l.state_code = ? AND f.feature_key = ?
-    ORDER BY l.name
-  `, [stateCode.toUpperCase(), featureKey.toLowerCase()]);
+    SELECT DISTINCT b.id AS listing_id, b.slug, b.name, b.address, sub.name AS town, b.latitude, b.longitude, b.is_24_hours AS is_open_24h, r.slug AS region_slug, sub.slug AS suburb_slug, b.state_code
+    FROM businesses b
+    INNER JOIN business_features bf ON bf.business_id = b.id
+    LEFT JOIN suburbs sub ON b.suburb_id = sub.id
+    LEFT JOIN regions r ON b.region_id = r.id
+    WHERE b.state_code = ? AND bf.feature_key = ?
+    ORDER BY b.name
+  `, [sc, featureKey.toLowerCase()]);
 
   return (listings || []) as ListingRecord[];
 }
@@ -386,15 +430,18 @@ export async function fetchStateListingsByFeature(stateCode: string, featureKey:
  * Used for region-level feature-filter pages
  */
 export async function fetchRegionListingsByFeature(stateCode: string, regionSlug: string, featureKey: string, env?: { DB?: D1Database }): Promise<ListingRecord[]> {
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
+  const sc = stateCode.toUpperCase();
 
   const listings = await runQuery(db, `
-    SELECT DISTINCT l.listing_id, l.slug, l.name, l.address, l.town, l.latitude, l.longitude, l.is_open_24h, l.region_slug, l.suburb_slug, l.state_code
-    FROM listings l
-    INNER JOIN features f ON f.listing_id = l.listing_id
-    WHERE l.state_code = ? AND l.region_slug = ? AND f.feature_key = ?
-    ORDER BY l.name
-  `, [stateCode.toUpperCase(), regionSlug, featureKey.toLowerCase()]);
+    SELECT DISTINCT b.id AS listing_id, b.slug, b.name, b.address, sub.name AS town, b.latitude, b.longitude, b.is_24_hours AS is_open_24h, r.slug AS region_slug, sub.slug AS suburb_slug, b.state_code
+    FROM businesses b
+    INNER JOIN business_features bf ON bf.business_id = b.id
+    LEFT JOIN suburbs sub ON b.suburb_id = sub.id
+    LEFT JOIN regions r ON b.region_id = r.id
+    WHERE b.state_code = ? AND r.slug = ? AND bf.feature_key = ?
+    ORDER BY b.name
+  `, [sc, regionSlug, featureKey.toLowerCase()]);
 
   return (listings || []) as ListingRecord[];
 }
@@ -404,15 +451,18 @@ export async function fetchRegionListingsByFeature(stateCode: string, regionSlug
  * Used for suburb-level feature-filter pages
  */
 export async function fetchSuburbListingsByFeature(stateCode: string, regionSlug: string, suburbSlug: string, featureKey: string, env?: { DB?: D1Database }): Promise<ListingRecord[]> {
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
+  const sc = stateCode.toUpperCase();
 
   const listings = await runQuery(db, `
-    SELECT DISTINCT l.listing_id, l.slug, l.name, l.address, l.town, l.latitude, l.longitude, l.is_open_24h, l.region_slug, l.suburb_slug, l.state_code
-    FROM listings l
-    INNER JOIN features f ON f.listing_id = l.listing_id
-    WHERE l.state_code = ? AND l.region_slug = ? AND l.suburb_slug = ? AND f.feature_key = ?
-    ORDER BY l.name
-  `, [stateCode.toUpperCase(), regionSlug, suburbSlug, featureKey.toLowerCase()]);
+    SELECT DISTINCT b.id AS listing_id, b.slug, b.name, b.address, sub.name AS town, b.latitude, b.longitude, b.is_24_hours AS is_open_24h, r.slug AS region_slug, sub.slug AS suburb_slug, b.state_code
+    FROM businesses b
+    INNER JOIN business_features bf ON bf.business_id = b.id
+    LEFT JOIN suburbs sub ON b.suburb_id = sub.id
+    LEFT JOIN regions r ON b.region_id = r.id
+    WHERE b.state_code = ? AND r.slug = ? AND sub.slug = ? AND bf.feature_key = ?
+    ORDER BY b.name
+  `, [sc, regionSlug, suburbSlug, featureKey.toLowerCase()]);
 
   return (listings || []) as ListingRecord[];
 }
@@ -422,16 +472,17 @@ export async function fetchSuburbListingsByFeature(stateCode: string, regionSlug
  * Also used to determine which feature-filter URLs to include in sitemap
  */
 export async function fetchSuburbFeatureCounts(stateCode: string, regionSlug: string, suburbSlug: string, env?: { DB?: D1Database }): Promise<FeatureCounts> {
-  const db = getD1Client(env);
+  const db = await getD1Client(env);
+  const sc = stateCode.toUpperCase();
   const featureKeys = ['accessible', 'baby_change', 'baby_care_room', 'changing_places', 'dump_point', 'shower', 'parking', 'drinking_water'];
 
   const results = await Promise.all([
     ...featureKeys.map((key) =>
-      runCount(db, 'SELECT COUNT(*) as cnt FROM features WHERE state_code = ? AND region_slug = ? AND suburb_slug = ? AND feature_key = ?', [stateCode.toUpperCase(), regionSlug, suburbSlug, key])
+      runCount(db, `SELECT COUNT(*) as cnt FROM business_features bf JOIN businesses b ON bf.business_id = b.id LEFT JOIN suburbs sub ON b.suburb_id = sub.id LEFT JOIN regions r ON b.region_id = r.id WHERE b.state_code = ? AND r.slug = ? AND sub.slug = ? AND bf.feature_key = ?`, [sc, regionSlug, suburbSlug, key])
         .then((count) => ({ key, count }))
     ),
-    runCount(db, 'SELECT COUNT(*) as cnt FROM listings WHERE state_code = ? AND region_slug = ? AND suburb_slug = ? AND is_open_24h = 1', [stateCode.toUpperCase(), regionSlug, suburbSlug])
-      .then((count) => ({ key: 'open_24h', count })),
+    runCount(db, `SELECT COUNT(*) as cnt FROM businesses b LEFT JOIN suburbs sub ON b.suburb_id = sub.id LEFT JOIN regions r ON b.region_id = r.id WHERE b.state_code = ? AND r.slug = ? AND sub.slug = ? AND b.is_24_hours = 1`, [sc, regionSlug, suburbSlug])
+      .then((count) => ({ key: 'open_24h', count }))
   ]);
 
   const map: Record<string, number> = {};
@@ -455,6 +506,6 @@ export async function fetchSuburbFeatureCounts(stateCode: string, regionSlug: st
  * Kept for backward compatibility with callers that used getDBClient()
  * during the Supabase era. All new code should prefer getD1Client() from ./d1.
  */
-export function getDBClient(env?: { DB?: D1Database }): D1Database {
+export async function getDBClient(env?: { DB?: D1Database }): Promise<D1Database> {
   return getD1Client(env);
 }

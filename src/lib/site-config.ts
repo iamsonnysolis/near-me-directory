@@ -105,7 +105,7 @@ async function _loadSiteConfigFromDB(env?: { DB?: any }): Promise<SiteConfig> {
     let db;
     try {
       const { getD1Client } = await import('./d1');
-      db = getD1Client(env);
+      db = await getD1Client(env);
     } catch {
       // No D1 binding available — use defaults
       return { ...DEFAULT_CONFIG };

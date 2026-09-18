@@ -7,7 +7,8 @@ pages_build_output_dir = "./dist"
 binding = "SESSION"
 id = "8c84cf74803340e085bda3a5da9bbbf2"
 
-# D1 database binding for site data
+# D1 database binding for site data — uses existing directory-factory D1 database
 [[d1_databases]]
 binding = "DB"
-database_name = "near-me-directory"
+database_name = "d1-directory-factory-89"
+database_id = "c46d5f2f-5be0-4a4c-aee6-bbf63bd713b0"

@@ -57,7 +57,12 @@ export async function getEntityStats(
   entityId: string | null = null,
   version?: string
 ): Promise<StatsMap> {
-  const db = getD1Client();
+  let db;
+  try {
+    db = await getD1Client();
+  } catch {
+    return {};
+  }
   if (!db) return {};
 
   const approved = true;
@@ -122,10 +127,15 @@ export async function getEntityRankings(
   metric: string,
   opts: { stateCode?: string } = {}
 ): Promise<RankingRow[]> {
-  const db = getD1Client();
+  let db;
+  try {
+    db = await getD1Client();
+  } catch {
+    return [];
+  }
   if (!db) return [];
 
-  let sql = `
+  let sql = `\`
     SELECT entity_id, value, rank, rank_of, metadata, source_version
     FROM stats
     WHERE entity_type = ?
@@ -167,7 +177,12 @@ export async function getRegionRankings(metric: string, stateCode?: string): Pro
 
 // Get all available data versions for the history section, newest first.
 export async function getAvailableVersions(): Promise<string[]> {
-  const db = getD1Client();
+  let db;
+  try {
+    db = await getD1Client();
+  } catch {
+    return [];
+  }
   if (!db) return [];
 
   const rows = await runQuery(db,

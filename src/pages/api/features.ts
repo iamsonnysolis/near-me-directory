@@ -15,7 +15,7 @@ interface FeaturesMap {
  * Returns features map for the given listing IDs
  */
 export const GET: APIRoute = async ({ url, locals }) => {
-  const db = getD1Client({ DB: (locals as any)?.DB });
+  const db = await getD1Client({ DB: (locals as any)?.DB });
   const idsParam = url.searchParams.get('ids');
 
   if (!idsParam) {
@@ -38,7 +38,7 @@ export const GET: APIRoute = async ({ url, locals }) => {
   try {
     const placeholders = ids.map(() => '?').join(',');
     const rows = await runQuery(db,
-      `SELECT listing_id, feature_key FROM features WHERE listing_id IN (${placeholders})`,
+      `SELECT business_id AS listing_id, feature_key FROM business_features WHERE business_id IN (${placeholders})`,
       ids
     );
 

@@ -32,7 +32,7 @@ interface SearchResult {
  * Returns matching suburbs and listings for autocomplete
  */
 export const GET: APIRoute = async ({ url, locals }) => {
-  const db = getD1Client({ DB: (locals as any)?.DB });
+  const db = await getD1Client({ DB: (locals as any)?.DB });
   const q = url.searchParams.get('q')?.trim() || '';
 
   if (!q || q.length < 2) {
@@ -48,11 +48,12 @@ export const GET: APIRoute = async ({ url, locals }) => {
 
     // Search suburbs (limit 8)
     const suburbs = await runQuery(db,
-      `SELECT id, name, slug, state_code, region_slug, listing_count, latitude, longitude
-       FROM suburbs
-       WHERE name LIKE ?
-         AND (listing_count > 0 OR listing_count IS NULL)
-       ORDER BY name
+      `SELECT s.id, s.name, s.slug, s.state_code, r.slug AS region_slug,
+         NULL AS latitude, NULL AS longitude
+       FROM suburbs s
+       LEFT JOIN regions r ON s.region_id = r.id
+       WHERE s.name LIKE ?
+       ORDER BY s.name
        LIMIT 8`,
       [likePattern]
     );
@@ -73,10 +74,12 @@ export const GET: APIRoute = async ({ url, locals }) => {
 
     // Search listings (limit 8)
     const listings = await runQuery(db,
-      `SELECT listing_id, slug, name, address, town, state_code, region_slug, suburb_slug
-       FROM listings
-       WHERE name LIKE ?
-       ORDER BY name
+      `SELECT b.id AS listing_id, b.slug, b.name, b.address, sub.name AS town, b.state_code, r.slug AS region_slug, sub.slug AS suburb_slug
+       FROM businesses b
+       LEFT JOIN suburbs sub ON b.suburb_id = sub.id
+       LEFT JOIN regions r ON b.region_id = r.id
+       WHERE b.name LIKE ?
+       ORDER BY b.name
        LIMIT 8`,
       [likePattern]
     );

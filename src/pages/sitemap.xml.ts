@@ -7,19 +7,24 @@ const toKebabCase = (snakeStr: string): string => snakeStr.replace(/_/g, '-');
 // Generate sitemap.xml dynamically via D1 SQL queries
 export async function GET() {
   const SITE_URL = import.meta.env?.PUBLIC_SITE_URL || 'https://nearme.directory';
-  const db = getD1Client();
+  const db = await getD1Client();
 
   // Get all states
   const states = await runQuery(db, 'SELECT code FROM states ORDER BY code');
 
   // Get all regions with listings
-  const regions = await runQuery(db, 'SELECT slug, state_code FROM regions WHERE (listing_count > 0 OR listing_count IS NULL)');
+  const regions = await runQuery(db, 'SELECT slug, state_code, business_count AS listing_count FROM regions WHERE business_count > 0');
 
-  // Get all suburbs with listings
-  const suburbs = await runQuery(db, 'SELECT slug, state_code, region_slug FROM suburbs WHERE (listing_count > 0 OR listing_count IS NULL)');
+  // Get all suburbs with listings (join regions for region_slug)
+  const suburbs = await runQuery(db, 'SELECT s.slug, s.state_code, r.slug AS region_slug FROM suburbs s JOIN regions r ON s.region_id = r.id WHERE s.business_count > 0');
 
-  // Get all listings
-  const listings = await runQuery(db, 'SELECT slug, state_code, region_slug, suburb_slug FROM listings');
+  // Get all listings (businesses with joins for region/suburb slugs)
+  const listings = await runQuery(db,
+    'SELECT b.slug, b.state_code, r.slug AS region_slug, sub.slug AS suburb_slug ' +
+    'FROM businesses b ' +
+    'LEFT JOIN suburbs sub ON b.suburb_id = sub.id ' +
+    'LEFT JOIN regions r ON b.region_id = r.id'
+  );
 
   const urls: string[] = [''];
 
@@ -44,7 +49,15 @@ export async function GET() {
   });
 
   // === FEATURE-FILTER PAGES ===
-  const allFeatures = await runQuery(db, 'SELECT feature_key, state_code, region_slug, suburb_slug FROM features');
+  // Query business_features joined with businesses, regions, and suburbs
+  // to get state_code, region_slug, and suburb_slug
+  const allFeatures = await runQuery(db,
+    'SELECT bf.feature_key, b.state_code, r.slug AS region_slug, sub.slug AS suburb_slug ' +
+    'FROM business_features bf ' +
+    'JOIN businesses b ON bf.business_id = b.id ' +
+    'LEFT JOIN suburbs sub ON b.suburb_id = sub.id ' +
+    'LEFT JOIN regions r ON b.region_id = r.id'
+  );
 
   const stateFeatures: Record<string, Set<string>> = {};
   const regionFeatures: Record<string, Set<string>> = {};

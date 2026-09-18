@@ -37,7 +37,7 @@ if (!stateRecord || !regionRecord) {
 
 // Fetch content, feature counts, and listings in parallel
 const [contentRows, featureCounts, regionFacilities] = await Promise.all([
-  fetchContent('region', `${region}-${stateSlug}`),
+  fetchContent('region', String(regionRecord.id)),
   fetchRegionFeatureCounts(region, stateCode),
   fetchRegionListings(stateCode, region),
 ]);

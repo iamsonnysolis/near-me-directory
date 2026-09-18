@@ -33,7 +33,7 @@ interface StatsResponse {
 const DEFAULT_VERSION = '2024-q4';
 
 export const GET: APIRoute = async ({ url, locals }) => {
-  const db = getD1Client({ DB: (locals as any)?.DB });
+  const db = await getD1Client({ DB: (locals as any)?.DB });
 
   const version = url.searchParams.get('version') || DEFAULT_VERSION;
   const metric = url.searchParams.get('metric');
