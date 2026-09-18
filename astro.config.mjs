@@ -12,7 +12,7 @@ export default defineConfig({
     },
   }),
   server: {
-    allowedHosts: ['localhost', '*.pages.dev', '*.taila*.ts.net'],
+    allowedHosts: true,
   },
   env: {
     schema: {
